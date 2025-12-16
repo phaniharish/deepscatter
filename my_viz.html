@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Galaxy (Manual Load)</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            overflow: hidden;
+            font-family: sans-serif;
+        }
+
+        #deepscatter {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            z-index: 1;
+        }
+
+        /* STATUS BAR */
+        #loader-status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #0f0;
+            font-size: 24px;
+            z-index: 10;
+            font-weight: bold;
+            text-shadow: 0 0 10px #000;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border: 1px solid #0f0;
+        }
+
+        /* DEBUG PANEL */
+        #inspector {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 300px;
+            background: rgba(20, 20, 20, 0.95);
+            border: 1px solid #555;
+            color: #ccc;
+            padding: 15px;
+            z-index: 100;
+            border-radius: 4px;
+            font-size: 13px;
+            display: none;
+        }
+
+        .row {
+            border-bottom: 1px solid #444;
+            padding: 4px 0;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .val {
+            color: #fff;
+            font-family: monospace;
+            font-weight: bold;
+        }
+
+        .success {
+            color: #4f4;
+        }
+
+        .err {
+            color: #f55;
+        }
+
+        .warn {
+            color: #fd0;
+        }
+
+        #preview-img {
+            width: 100%;
+            border: 1px solid #555;
+            margin-top: 10px;
+            background: #000;
+            min-height: 50px;
+            display: block;
+            object-fit: contain;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="deepscatter"></div>
+    <div id="loader-status">Initializing...</div>
+
+    <div id="inspector">
+        <div class="row"><span>ID:</span> <span id="disp-id" class="val">--</span></div>
+        <div class="row"><span>Status:</span> <span id="disp-status" class="val">--</span></div>
+        <img id="preview-img" src="" />
+    </div>
+
+    <script type="module">
+        import { Scatterplot } from './src/scatterplot.ts';
+        import * as Arrow from 'apache-arrow';
+
+        const status = document.getElementById('loader-status');
+
+        const prefs = {
+            // Note: source_url is intentionally omitted.
+            max_points: 3000000,
+            alpha: 30,
+            zoom_balance: 0.1,
+            point_size: 4,
+            background_color: '#000000',
+            color: '#ff00ff',
+            encoding: {
+                x: { field: 'x', transform: 'literal' },
+                y: { field: 'y', transform: 'literal' },
+                item_id: { field: 'item_id', transform: 'literal' }
+            },
+            tooltip_html: (d) => ""
+        };
+
+        // 1. MANUALLY LOAD ARROW FILE
+        status.textContent = "Downloading Data (40MB)...";
+
+        fetch('/points.feather')
+            .then(res => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.arrayBuffer();
+            })
+            .then(buffer => {
+                status.textContent = "Parsing Arrow Table...";
+                const table = Arrow.tableFromIPC(buffer);
+                console.log(`✅ Loaded Table: ${table.numRows} rows`);
+
+                status.textContent = "Rendering...";
+                const scatterplot = new Scatterplot('#deepscatter', window.innerWidth, window.innerHeight);
+
+                window.addEventListener('resize', () => {
+                    if (scatterplot.renderer?.resize) scatterplot.renderer.resize(window.innerWidth, window.innerHeight);
+                });
+
+                // --- THE FIX IS HERE ---
+                // We use 'arrow_table' instead of 'data'.
+                const finalPrefs = { ...prefs, arrow_table: table };
+
+                scatterplot.plotAPI(finalPrefs).then(() => {
+                    status.style.display = 'none';
+                    console.log("✅ Visualization Ready.");
+                    setupInteraction(scatterplot);
+                });
+            })
+            .catch(err => {
+                console.error(err);
+                status.textContent = "ERROR: " + err.message;
+                status.style.color = "red";
+                status.style.borderColor = "red";
+            });
+
+        function setupInteraction(scatterplot) {
+            const ui = {
+                box: document.getElementById('inspector'),
+                id: document.getElementById('disp-id'),
+                status: document.getElementById('disp-status'),
+                img: document.getElementById('preview-img')
+            };
+
+            scatterplot.click_function = (datum) => {
+                console.log("🖱️ CLICK:", datum);
+                ui.box.style.display = 'block';
+
+                let rawId = datum.item_id || datum.id;
+
+                if (!rawId) {
+                    ui.id.textContent = "MISSING ID";
+                    ui.status.textContent = "Check Console";
+                    ui.status.className = "val err";
+                    return;
+                }
+
+                const cleanId = String(rawId).replace(/\.0$/, '').trim();
+                ui.id.textContent = cleanId;
+
+                const urlPng = `/images/${cleanId}.png`;
+                const urlJpg = `/images/${cleanId}.jpg`;
+
+                ui.img.style.display = 'block';
+                ui.status.textContent = "Loading...";
+                ui.status.className = "val warn";
+
+                ui.img.onload = () => {
+                    ui.status.textContent = "SUCCESS (PNG)";
+                    ui.status.className = "val success";
+                };
+
+                ui.img.onerror = () => {
+                    if (ui.img.src.endsWith('.png')) {
+                        console.log("Trying JPG...");
+                        ui.img.src = urlJpg;
+                    } else {
+                        ui.status.textContent = "NOT FOUND (404)";
+                        ui.status.className = "val err";
+                    }
+                };
+
+                ui.img.src = urlPng;
+            };
+        }
+    </script>
+</body>
+
+</html>
